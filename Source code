@@ -1,0 +1,306 @@
+//==============================================================================================
+//定数宣言
+//==============================================================================================
+const LINE_ACCESS_TOKEN = "★"
+const LINE_REPLY = "https://api.line.me/v2/bot/message/reply"
+const LINE_SECRET = "★"
+
+const NOTION_URL = 'https://api.notion.com/v1/pages'
+const NOTION_ACCESS_TOKEN = '★'
+const NOTION_DATABASE_ID = '★'
+
+
+
+//==============================================================================================
+//メイン処理
+//==============================================================================================
+function doPost(e) {
+  //受信メッセージ編集
+  var json = JSON.parse(e.postData.contents);
+  var isbnNo = json.events[0].message.text;
+
+  //書籍の基本情報取得
+  var bookData = getBibliographByISBN(isbnNo);
+  //カバー画像取得できなかった場合の対応
+  if(bookData.cover == ""){
+    bookData.cover = "google.com";
+    var coverLess = "X"
+  }
+
+  //書籍の基本情報編集
+  var bookData = editBookData(bookData);
+
+  //Notionへ連携
+  var resFromNotion = postNotion(bookData);
+
+  //Start of LINE返信
+  var reply_token= json.events[0].replyToken;
+  if (typeof reply_token === 'undefined') {
+    console.log("reply_token is undefined..")
+    return;
+  }
+
+  var sendMessage
+  if(resFromNotion.code == 400){
+    sendMessage = "Notionへの登録に失敗しました" + resFromNotion.code + resFromNotion.body
+  }else if(resFromNotion.code == 200){
+    sendMessage = "「"+bookData.title + "」を登録しました。"
+    if(coverLess == "X"){
+      sendMessage = sendMessage + "画像は手動で登録してください。"
+    }
+  }
+
+  var options = {
+    headers: {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'Authorization': 'Bearer ' + LINE_ACCESS_TOKEN,
+    },
+    method: 'post',
+    payload: JSON.stringify({
+      replyToken: reply_token,
+      messages: [{
+        type: 'text',
+        text: sendMessage
+      }],
+    }),
+    muteHttpExceptions: true
+  }
+
+//  if(ERROR_MESSAGE != null){
+    //options.payload.messages.text = ERROR_MESSAGE
+  //}
+
+  try{
+    var res = UrlFetchApp.fetch(LINE_REPLY, options);
+    var resCode = res.getResponseCode();
+    var resBody = res.getContentText();
+    console.log(resCode);
+    console.log(resBody)
+  }
+  catch(e){
+    console.log('Error!')
+    console.log(e)
+  }
+  //End of LINE返信
+
+}
+//==============================================================================================
+//サブ処理
+//==============================================================================================
+//-----------------------------------------------
+//Notionへ連携
+//-----------------------------------------------
+function postNotion(data) {
+  //データ編集
+  var postData = {
+    parent:{'database_id':NOTION_DATABASE_ID},
+    properties:{
+      Name:{
+        title:[{
+          text:{
+            content:data.title
+          }
+        }]
+      },
+      Regidate: {
+        date: {
+          start: getDate(),
+          end: null
+        }
+      },
+      Author: {
+        rich_text: [{
+          text: {
+            content: data.author
+          }
+        }]
+      },
+      Pubdate: {
+        date: {
+          start: data.pubdate,
+          end: null
+        }
+      },
+      Publisher: {
+        rich_text: [{
+          text: {
+            content: data.publisher
+          }
+        }]
+      },
+      Display: {
+        files: [{
+          name: "image url",
+          type : "external",
+          external:{
+            url : data.cover
+          }
+        }]
+      },
+      Isbn: {
+        rich_text: [{
+          text: {
+            content: data.isbn
+          }
+        }]
+      },
+    }
+  }
+
+  //Notion連携準備
+  var headers = {
+    'Content-Type': 'application/json; charset=UTF-8',
+    'Authorization': 'Bearer ' + NOTION_ACCESS_TOKEN,
+    'Notion-Version':'2021-08-16',
+  };
+  var options = {
+    method: "post",
+    headers: headers,
+    payload :JSON.stringify(postData),
+    muteHttpExceptions: true
+  }
+
+  //Notionへ連携
+  try{
+    var res = UrlFetchApp.fetch(NOTION_URL,options);
+    var response = {
+      code: res.getResponseCode(),
+      body: res.getContentText()
+    }
+  }
+  catch(e){
+    console.log('Error!')
+    console.log(e)
+    ERROR_MESSAGE = 'Notionへの登録に失敗しました'
+  }
+
+  return response;
+
+}
+
+//-----------------------------------------------
+//現在日付取得
+//-----------------------------------------------
+function getDate(){
+  var today = new Date();
+  var year = today.getFullYear()
+  var month = today.getMonth() + 1;
+  var date = today.getDate();
+
+  if(month < 10)month = "0"+month;
+  if(date  < 10)date  = "0"+date;
+  var hiduke = year + "-" + month + "-" +date;
+
+  return hiduke;
+}
+
+//-----------------------------------------------
+//書籍の基本情報取得
+//-----------------------------------------------
+function getBibliographByISBN(isbn){
+  var url = `https://api.openbd.jp/v1/get?isbn=${isbn}`;
+
+  var options = {
+    muteHttpExceptions: true
+  }
+
+  try{
+    var res = UrlFetchApp.fetch(url,options);
+    var response = {
+      code: res.getResponseCode(),
+      body: res.getContenttext()
+    }
+  }
+  catch(e){
+    console.log('Error!')
+    console.log(e)
+    ERROR_MESSAGE = "openDBの取得に失敗しました"
+  }
+
+  var data = JSON.parse(res.getContentText())[0];
+  var sum = data.summary;
+
+  return sum;
+}
+
+//-----------------------------------------------
+//書籍の基本情報編集
+//-----------------------------------------------
+function editBookData(data){
+
+  //pubdate　日付形式に変換(YYYY-MM-DD)
+  //YYYY-MM-DD
+  var pattern1 = data.pubdate.match(/^\d{4}-\d{2}-\d{2}$/)
+  //YYYY-MM-D
+  var pattern2 = data.pubdate.match(/^\d{4}-\d{2}-\d{1}$/)
+  //YYYY-M-DD
+  var pattern3 = data.pubdate.match(/^\d{4}-\d{1}-\d{2}$/)
+  //YYYY-M-D
+  var pattern4 = data.pubdate.match(/^\d{4}-\d{1}-\d{1}$/)
+  //YYYYMMDD
+  var pattern5 = data.pubdate.match(/^\d{8}$/)
+  //YYYY-MM
+  var pattern6 = data.pubdate.match(/^\d{4}-\d{2}$/)
+  //YYYY-M
+  var pattern7 = data.pubdate.match(/^\d{4}-\d{1}$/)
+
+  if(pattern1  != null){
+    //処理なし
+  }else if(pattern2 != null){
+    var year = data.pubdate.substr(0,4);
+    var month = data.pubdate.substr(5,2);
+    var day   = "0" + data.pubdate.substr(8,1);
+    data.pubdate = year + "-" + month + "-" + day
+
+  }else if(pattern3 != null){
+    var year = data.pubdate.substr(0,4);
+    var month = "0" + data.pubdate.substr(5,1);
+    var day   = data.pubdate.substr(7,2);
+    data.pubdate = year + "-" + month + "-" + day
+
+  }else if(pattern4 != null){
+    var year = data.pubdate.substr(0,4);
+    var month = "0" + data.pubdate.substr(5,1);
+    var day   = "0" + data.pubdate.substr(7,1);
+    data.pubdate = year + "-" + month + "-" + day
+
+  }else if(pattern5 != null){
+    var year = data.pubdate.substr(0,4);
+    var month = data.pubdate.substr(4,2);
+    var day   = data.pubdate.substr(6,2);
+    data.pubdate = year + "-" + month + "-" + day
+
+  }else if(pattern6 != null){
+    data.pubdate = data.pubdate + "-01";
+
+  }else if (pattern7 != null){
+    var year = data.pubdate.substr(0,4);
+    var month = "0" + data.pubdate.substr(5,1);
+    var day = "01"
+    data.pubdate = year + "-" + month + "-" + day
+    
+  }
+
+  check =　data.pubdate.match(/^\d{4}-\d{2}-\d{2}$/)
+
+  if(check == null){
+    data.pubdate = "9999-12-31"
+  }
+
+  //Author「／著」を削除(複数著者考慮あり)  
+  var exist = 0;
+  while(exist < 1){
+    data.author = data.author.replace("／著","")  
+    if(data.author.indexOf("／著") >= 0){
+    }
+    else{
+      exist++; 
+    }
+  }
+
+  return data;
+  
+}
+
+
+
